@@ -138,7 +138,7 @@ USAGE:
 
 OPTIONS:
     -c, --config <PATH>            Path to settings directory or config file
-        --path.settings <DIR>      Path to pipeline settings directory (default: /etc/logstash)
+        --path.settings <DIR>      Path to pipeline settings directory (default: /etc/redborder-vortex)
         --config.test_and_exit     Validate pipelines.yml and all .conf files and exit
     -t, --status                   Query running daemon status/stats over IPC socket
     -r, --reset                    Reset daemon statistics counters over IPC socket

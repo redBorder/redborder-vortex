@@ -3,7 +3,7 @@ Description=redBorder Vortex high-throughput telemetry and log pipeline engine
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/redborder-vortex --path.settings /etc/logstash
+ExecStart=/usr/bin/redborder-vortex --path.settings /etc/redborder-vortex
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 User=redborder-vortex

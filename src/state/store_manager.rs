@@ -7,7 +7,7 @@ use crate::state::{
 };
 use dashmap::DashMap;
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 const ENRICH_STORES: [&str; 7] = [
@@ -36,6 +36,14 @@ pub const DYNAMIC_TTL_STORES: [&str; 6] = [
     NMSP_STORE_INFO,
     RADIUS_STORE,
 ];
+
+/// Keys present in `current` that are no longer in `valid` (pure; no I/O).
+pub fn keys_to_purge<I: IntoIterator<Item = String>>(
+    current: I,
+    valid: &HashSet<String>,
+) -> Vec<String> {
+    current.into_iter().filter(|k| !valid.contains(k)).collect()
+}
 
 pub struct StateStore {
     stores: DashMap<String, DashMap<String, Map<String, Value>>>,
@@ -134,6 +142,41 @@ impl StateStore {
         if let Some(tstore) = self.ttls.get(store_name) {
             tstore.remove(record_key);
         }
+    }
+
+    /// Remove from `store_name` every key not in `valid` (locally and in the
+    /// backend, which also notifies peer nodes). `valid == None` means the
+    /// source query failed: nothing is purged, so a DB outage cannot empty the
+    /// cache. `Some(empty)` is a successful query with 0 rows: purge all.
+    /// Returns the purged keys.
+    pub fn purge_missing(
+        &self,
+        store_name: &str,
+        valid: Option<&HashSet<String>>,
+    ) -> anyhow::Result<Vec<String>> {
+        let Some(valid) = valid else {
+            return Ok(Vec::new());
+        };
+        let mut current: HashSet<String> = self
+            .stores
+            .get(store_name)
+            .map(|s| s.iter().map(|e| e.key().clone()).collect())
+            .unwrap_or_default();
+        if let Some(backend) = &self.backend {
+            // Keys written by other nodes (or missed by pubsub) live only in the backend.
+            current.extend(backend.hgetall_store(store_name)?.into_keys());
+        }
+        let stale = keys_to_purge(current, valid);
+        if stale.is_empty() {
+            return Ok(stale);
+        }
+        if let Some(backend) = &self.backend {
+            backend.hdel_records(store_name, &stale)?;
+        }
+        for k in &stale {
+            self.remove_record_local(store_name, k);
+        }
+        Ok(stale)
     }
 
     pub fn replace_store_local(

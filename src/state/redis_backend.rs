@@ -24,6 +24,9 @@ pub trait ClusterBackend: Send + Sync {
 
     fn evict_expired(&self, store_name: &str) -> anyhow::Result<Vec<String>>;
 
+    /// Delete the given keys from the store (and from its TTL index, if any).
+    fn hdel_records(&self, store_name: &str, keys: &[String]) -> anyhow::Result<()>;
+
     fn hgetall_store(
         &self,
         store_name: &str,
@@ -237,6 +240,30 @@ impl ClusterBackend for RedisClusterBackend {
                 let _: () = conn.publish(PUBSUB_CHANNEL, notification)?;
             }
             Ok(expired)
+        })
+    }
+
+    fn hdel_records(&self, store_name: &str, keys: &[String]) -> anyhow::Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let rkey = Self::store_key(store_name);
+        let ttl_k = Self::ttl_key(store_name);
+        self.with_conn(|conn| {
+            let mut pipe = redis::pipe();
+            pipe.atomic();
+            pipe.hdel(&rkey, keys);
+            pipe.zrem(&ttl_k, keys);
+            let () = pipe.query(conn)?;
+            // Same "evict" op peers already handle: they drop the keys locally.
+            let notification = json!({
+                "op": "evict",
+                "store": store_name,
+                "keys": keys,
+            })
+            .to_string();
+            let _: () = conn.publish(PUBSUB_CHANNEL, notification)?;
+            Ok(())
         })
     }
 
@@ -456,6 +483,20 @@ impl ClusterBackend for InMemoryClusterBackend {
             }
         }
         Ok(expired)
+    }
+
+    fn hdel_records(&self, store_name: &str, keys: &[String]) -> anyhow::Result<()> {
+        if let Some(store) = self.stores.get(store_name) {
+            for k in keys {
+                store.remove(k);
+            }
+        }
+        if let Some(tstore) = self.ttls.get(store_name) {
+            for k in keys {
+                tstore.remove(k);
+            }
+        }
+        Ok(())
     }
 
     fn hgetall_store(

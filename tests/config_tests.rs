@@ -480,3 +480,81 @@ fn test_parse_json_style_colon_separators_in_plugin_settings() {
     let parsed = parse_logstash_conf(conf).expect("Should parse JSON colon separators in map");
     assert_eq!(parsed.filters.len(), 1);
 }
+
+#[test]
+fn test_regex_match_and_not_match_conditions() {
+    // trap-pipeline 05_enrichment.conf uses `!~` with a /.../ literal
+    let conf = r#"
+    filter {
+      if [host] !~ /^\d+\.\d+\.\d+\.\d+$/ {
+        grok { match => { "transport" => "^%{DATA}: \[%{IP:host}\]:%{POSINT}" } }
+      }
+      if [path] =~ /^\/var\/log/ and [msg] =~ "err(or)?" {
+        mutate { add_tag => ["matched"] }
+      }
+    }
+    "#;
+    let parsed = parse_logstash_conf(conf).expect("Should parse =~ and !~");
+    let cond = |i: usize| match &parsed.filters[i] {
+        Statement::Conditional(c) => c.branches[0].0.clone(),
+        _ => panic!("Expected conditional"),
+    };
+    let not_ipv4 = cond(0);
+    let both = cond(1);
+
+    let mut ev = Event::new();
+    ev.set("host", "10.0.0.1");
+    assert!(!eval_expr(&not_ipv4, &ev));
+    ev.set("host", "UDP: [10.0.0.1]:161");
+    assert!(eval_expr(&not_ipv4, &ev));
+    // like Logstash, a missing field does not match, so `!~` is true
+    ev.remove("host");
+    assert!(eval_expr(&not_ipv4, &ev));
+
+    ev.set("path", "/var/log/messages");
+    ev.set("msg", "disk error");
+    assert!(eval_expr(&both, &ev));
+    ev.set("path", "/tmp/var/log");
+    assert!(!eval_expr(&both, &ev));
+}
+
+#[test]
+fn test_invalid_regex_is_a_config_error() {
+    let conf = r#"filter { if [a] =~ /(unclosed/ { drop {} } }"#;
+    assert!(parse_logstash_conf(conf).is_err());
+}
+
+#[test]
+fn test_regex_match_edge_cases() {
+    // =~ without a regex or string is a config error
+    assert!(parse_logstash_conf(r#"filter { if [a] =~ [b] { drop {} } }"#).is_err());
+
+    let conf = r#"
+    filter {
+      if [n] =~ /^4\d$/ { drop {} }
+      if [b] =~ /^true$/ { drop {} }
+      if [p] =~ /a\\/ { drop {} }
+      if ! [h] =~ /^\d+$/ { drop {} }
+    }
+    "#;
+    let parsed = parse_logstash_conf(conf).expect("Should parse regex edge cases");
+    let cond = |i: usize| match &parsed.filters[i] {
+        Statement::Conditional(c) => c.branches[0].0.clone(),
+        _ => panic!("Expected conditional"),
+    };
+
+    let mut ev = Event::new();
+    // numbers and booleans are matched against their text
+    ev.set("n", 42);
+    assert!(eval_expr(&cond(0), &ev));
+    ev.set("b", true);
+    assert!(eval_expr(&cond(1), &ev));
+    // `\\` before the closing slash is an escaped backslash: /a\\/ matches "a\"
+    ev.set("p", "a\\");
+    assert!(eval_expr(&cond(2), &ev));
+    // `! [h] =~ re` is Not(Match)
+    ev.set("h", "123");
+    assert!(!eval_expr(&cond(3), &ev));
+    ev.set("h", "abc");
+    assert!(eval_expr(&cond(3), &ev));
+}

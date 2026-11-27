@@ -1,4 +1,5 @@
 use crate::event::Event;
+use regex::Regex;
 use serde_json::{Number, Value};
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -139,6 +140,21 @@ pub enum Expr {
         needle: Operand,
         haystack: Operand,
     },
+    /// `[field] =~ /re/` (`!~` is parsed as `Not(Match)`)
+    Match {
+        left: Operand,
+        pattern: RegexPattern,
+    },
+}
+
+/// Regex compiled at config load time; compared by its source pattern
+#[derive(Debug, Clone)]
+pub struct RegexPattern(pub Regex);
+
+impl PartialEq for RegexPattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_str() == other.0.as_str()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,5 +270,10 @@ pub fn eval_expr(expr: &Expr, event: &Event) -> bool {
                 _ => false,
             }
         }
+        Expr::Match { left, pattern } => match resolve_operand(left, event) {
+            Some(Value::String(s)) => pattern.0.is_match(&s),
+            Some(v @ (Value::Number(_) | Value::Bool(_))) => pattern.0.is_match(&v.to_string()),
+            _ => false,
+        },
     }
 }

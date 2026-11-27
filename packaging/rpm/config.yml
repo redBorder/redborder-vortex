@@ -1,7 +1,7 @@
 ---
 # redborder-vortex cluster configuration
-path.settings: "/etc/logstash"
-pipelines.yml: "/etc/logstash/pipelines.yml"
+path.settings: "/etc/redborder-vortex"
+pipelines.yml: "/etc/redborder-vortex/pipelines.yml"
 ipc.socket: "/run/redborder-vortex/redborder-vortex.sock"
 plugins.dir: "/usr/share/redborder-vortex/plugins"
 

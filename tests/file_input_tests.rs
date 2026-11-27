@@ -130,6 +130,44 @@ fn test_file_input_completed_action_delete() {
 }
 
 #[test]
+fn test_file_input_completed_action_log_and_delete() {
+    // bulkstats_input.conf uses file_completed_action => "log_and_delete"
+    let tmp = TempTestDir::new("file_test_log_and_delete");
+    let data_file = tmp.0.join("bulkstats.csv");
+    fs::write(&data_file, "line 1\n").unwrap();
+    let log_path = tmp.0.join("completed.log");
+
+    let cfg = FileInputConfig {
+        path: vec![format!("{}/*.csv", tmp.0.to_string_lossy())],
+        mode: "read".to_string(),
+        sincedb_path: None,
+        file_completed_action: Some("log_and_delete".to_string()),
+        file_completed_log_path: Some(log_path.clone()),
+    };
+    let mut consumer = FileConsumer::new(cfg, "node1".to_string());
+
+    let state = Arc::new(StateStore::new_standalone());
+    let stats = Arc::new(StatsRegistry::new("node1".to_string()));
+    let mut engine = VortexEngine::new_with_stats(state, stats, "node1".to_string());
+    let parsed = parse_logstash_conf(
+        r#"input { file { path => "/dummy/*.csv" } } output { stdout { codec => json } }"#,
+    )
+    .unwrap();
+    let entry = redborder_vortex::config::PipelineEntry {
+        id: "test-log-and-delete".to_string(),
+        path_config: "".to_string(),
+        workers: 1,
+    };
+    engine.register_pipeline(entry, &parsed).unwrap();
+
+    let (events_count, _) = consumer.poll_and_process(&engine, "test-log-and-delete").unwrap();
+    assert_eq!(events_count, 1);
+    assert!(!data_file.exists(), "File should be deleted with log_and_delete");
+    let log = fs::read_to_string(&log_path).expect("completed log should be written");
+    assert!(log.contains("bulkstats.csv"));
+}
+
+#[test]
 fn test_file_input_end_to_end_malware_flow() {
     let tmp = TempTestDir::new("file_test3");
     let sample_file = tmp.0.join("suspicious.bin");

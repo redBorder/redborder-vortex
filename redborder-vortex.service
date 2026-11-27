@@ -3,12 +3,15 @@ Description=redBorder Vortex high-throughput telemetry and log pipeline engine
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/redborder-vortex --path.settings /etc/logstash
+ExecStart=/usr/bin/redborder-vortex --path.settings /etc/redborder-vortex
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 User=redborder-vortex
 Group=redborder-vortex
 RuntimeDirectory=redborder-vortex
+# Paths written by the pipelines under ProtectSystem=strict (file input logs/sincedb,
+# file_completed_action delete, malware clean_input_files). "-": skip if missing (e.g. proxy)
+ReadWritePaths=-/var/log/redborder-vortex -/usr/share/malware -/etc/bulkstats/data
 
 # Hardening / Sandboxing Measures
 NoNewPrivileges=yes

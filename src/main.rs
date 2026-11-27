@@ -319,7 +319,7 @@ fn run_benchmark() -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
-    let mut settings_dir = "/etc/logstash".to_string();
+    let mut settings_dir = "/etc/redborder-vortex".to_string();
     let mut custom_settings = false;
     let mut socket_path = default_socket_path();
     let mut custom_socket = false;

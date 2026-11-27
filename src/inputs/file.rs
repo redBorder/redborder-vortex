@@ -118,7 +118,7 @@ impl FileConsumer {
             // In Logstash, default completed action is "delete" in read mode, and "log" (never delete) in tail mode.
             let default_action = if self.config.mode == "read" { "delete" } else { "log" };
             let action = self.config.file_completed_action.as_deref().unwrap_or(default_action);
-            if action == "delete" {
+            if action == "delete" || action == "log_and_delete" {
                 let _ = fs::remove_file(&file_path);
             }
 

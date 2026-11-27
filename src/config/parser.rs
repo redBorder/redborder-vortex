@@ -1,5 +1,6 @@
 use crate::config::ast::{
-    CompareOp, ConditionalBlock, ConfigValue, Expr, Operand, PipelineConfig, PluginBlock, Statement,
+    CompareOp, ConditionalBlock, ConfigValue, Expr, Operand, PipelineConfig, PluginBlock,
+    RegexPattern, Statement,
 };
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -27,6 +28,9 @@ enum Token {
     Lte,        // <=
     Gt,         // >
     Gte,        // >=
+    Match,      // =~
+    NotMatch,   // !~
+    RegexLit(String), // /pattern/
 }
 
 fn tokenize(input: &str) -> Result<Vec<Token>> {
@@ -103,6 +107,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
                     tokens.push(Token::EqEq);
                     i += 2;
                     continue;
+                } else if i + 1 < len && chars[i + 1] == '~' {
+                    tokens.push(Token::Match);
+                    i = lex_regex_literal(&chars, i + 2, &mut tokens)?;
+                    continue;
                 } else {
                     bail!("Unexpected '=' at position {}", i);
                 }
@@ -111,6 +119,9 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
                 if i + 1 < len && chars[i + 1] == '=' {
                     tokens.push(Token::NotEq);
                     i += 2;
+                } else if i + 1 < len && chars[i + 1] == '~' {
+                    tokens.push(Token::NotMatch);
+                    i = lex_regex_literal(&chars, i + 2, &mut tokens)?;
                 } else {
                     tokens.push(Token::Bang);
                     i += 1;
@@ -270,6 +281,42 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
     }
 
     Ok(tokens)
+}
+
+/// After `=~` / `!~`: if the next non-blank char is `/`, read a `/.../` literal
+/// (`\/` is an escaped slash, other escapes are kept for the regex engine).
+/// Otherwise leave the position untouched so a quoted string can be used as pattern.
+fn lex_regex_literal(chars: &[char], mut i: usize, tokens: &mut Vec<Token>) -> Result<usize> {
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    if i >= chars.len() || chars[i] != '/' {
+        return Ok(i);
+    }
+    i += 1;
+    let mut s = String::new();
+    while i < chars.len() {
+        match chars[i] {
+            '/' => {
+                tokens.push(Token::RegexLit(s));
+                return Ok(i + 1);
+            }
+            '\\' if i + 1 < chars.len() && chars[i + 1] == '/' => {
+                s.push('/');
+                i += 2;
+            }
+            '\\' if i + 1 < chars.len() => {
+                s.push('\\');
+                s.push(chars[i + 1]);
+                i += 2;
+            }
+            c => {
+                s.push(c);
+                i += 1;
+            }
+        }
+    }
+    bail!("Unterminated regex literal")
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -617,6 +664,20 @@ impl Parser {
                     op: CompareOp::Gte,
                     right,
                 })
+            }
+            Some(Token::Match) | Some(Token::NotMatch) => {
+                let negate = self.next() == Some(Token::NotMatch);
+                let raw = match self.next() {
+                    Some(Token::RegexLit(r)) | Some(Token::StringLit(r)) => r,
+                    other => bail!("Expected regex after =~ / !~, found {:?}", other),
+                };
+                let re = regex::Regex::new(&raw)
+                    .with_context(|| format!("Invalid regex /{}/", raw))?;
+                let m = Expr::Match {
+                    left,
+                    pattern: RegexPattern(re),
+                };
+                Ok(if negate { Expr::Not(Box::new(m)) } else { m })
             }
             Some(Token::Ident(kw)) if kw == "in" => {
                 self.next();

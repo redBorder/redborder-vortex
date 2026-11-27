@@ -3,6 +3,7 @@ use crate::state::{
     WLC_PSQL_STORE,
 };
 use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -15,6 +16,19 @@ pub struct PostgresSyncConfig {
     pub database: String,
     pub user: String,
     pub password: String,
+}
+
+/// Purge keys of `store` absent from `valid`. `valid` is `Some` only when the
+/// PostgreSQL query succeeded (even with 0 rows); on failure it is `None` and
+/// nothing is purged, so a connection/query error never empties the cache.
+fn purge_stale(state: &StateStore, store: &str, valid: Option<HashSet<String>>) {
+    match state.purge_missing(store, valid.as_ref()) {
+        Ok(keys) if !keys.is_empty() => {
+            println!("PostgreSQL sync: purged {} stale record(s) from '{}'", keys.len(), store);
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("Warning: failed to purge stale records from '{}': {}", store, e),
+    }
 }
 
 impl PostgresSyncConfig {
@@ -86,8 +100,10 @@ impl PostgresSyncConfig {
             }
         };
 
+        let mut sensor_valid: Option<HashSet<String>> = None;
         match sensor_rows {
             Ok(rows) => {
+                let mut valid = HashSet::new();
                 for row in rows {
                     let id_val: Option<i64> = row
                         .try_get::<_, i64>(0)
@@ -159,18 +175,22 @@ impl PostgresSyncConfig {
                     if let Some(ref u) = uuid {
                         if !u.is_empty() {
                             let _ = state.put_record(SENSOR_PSQL_STORE, u, rec.clone());
+                            valid.insert(u.clone());
                             total_synced += 1;
                         }
                     }
                     if let Some(id) = id_val {
                         let _ = state.put_record(SENSOR_PSQL_STORE, &id.to_string(), rec);
+                        valid.insert(id.to_string());
                     }
                 }
+                sensor_valid = Some(valid);
             }
             Err(e) => {
                 eprintln!("Warning: Failed to query sensors table: {}", e);
             }
         }
+        purge_stale(state, SENSOR_PSQL_STORE, sensor_valid);
 
         // 2. Sync access points (WLC) with full nested-set hierarchy and zones
         let hierarchical_query = r#"
@@ -214,8 +234,11 @@ impl PostgresSyncConfig {
             ORDER BY access_points.mac_address, access_points.id
         "#;
 
+        // Valid AP keys = union of the hierarchical query and (only if it failed) the fallback.
+        let mut wlc_valid: Option<HashSet<String>> = None;
         match client.query(hierarchical_query, &[]).await {
             Ok(rows) => {
+                let mut valid = HashSet::new();
                 for row in rows {
                     let mac: Option<String> = row.try_get("mac_address").ok();
                     let ap_name: Option<String> = row.try_get("ap_name").ok();
@@ -305,10 +328,12 @@ impl PostgresSyncConfig {
                         if !normalized.is_empty() {
                             rec.insert("mac".to_string(), json!(normalized));
                             let _ = state.put_record(WLC_PSQL_STORE, &normalized, rec.clone());
+                            valid.insert(normalized);
                             total_synced += 1;
                         }
                     }
                 }
+                wlc_valid = Some(valid);
             }
             Err(e) => {
                 // Table schema or sensors joins might not be available in mock DBs; fall back to basic query
@@ -323,6 +348,7 @@ impl PostgresSyncConfig {
                     )
                     .await
                 {
+                    let mut valid = HashSet::new();
                     for row in rows {
                         let name: Option<String> = row.try_get(1).ok();
                         let mac: Option<String> = row.try_get(2).ok();
@@ -342,13 +368,16 @@ impl PostgresSyncConfig {
                             if !normalized.is_empty() {
                                 rec.insert("mac".to_string(), json!(normalized));
                                 let _ = state.put_record(WLC_PSQL_STORE, &normalized, rec.clone());
+                                valid.insert(normalized);
                                 total_synced += 1;
                             }
                         }
                     }
+                    wlc_valid = Some(valid);
                 }
             }
         }
+        purge_stale(state, WLC_PSQL_STORE, wlc_valid);
 
         // 3. Sync device IPs from ipam_ip_addresses
         let device_ips_query = r#"
@@ -429,8 +458,10 @@ impl PostgresSyncConfig {
             ORDER BY ip, COALESCE(namespace_uuid, ''), priority ASC
         "#;
 
+        let mut dev_ip_valid: Option<HashSet<String>> = None;
         match client.query(device_ips_query, &[]).await {
             Ok(rows) => {
+                let mut valid = HashSet::new();
                 for row in rows {
                     let ip: Option<String> = row.try_get("ip").ok();
                     let dev_id_opt: Option<i64> = row
@@ -463,20 +494,24 @@ impl PostgresSyncConfig {
                                     rec.insert("namespace_uuid".to_string(), json!(ns));
                                     let ns_key = format!("{}:{}", ns, clean_ip);
                                     let _ = state.put_record(DEVICE_IP_PSQL_STORE, &ns_key, rec);
+                                    valid.insert(ns_key);
                                     total_synced += 1;
                                     continue;
                                 }
                             }
                             let _ = state.put_record(DEVICE_IP_PSQL_STORE, clean_ip, rec);
+                            valid.insert(clean_ip.to_string());
                             total_synced += 1;
                         }
                     }
                 }
+                dev_ip_valid = Some(valid);
             }
             Err(e) => {
                 eprintln!("Warning: Failed to query device IPs: {}", e);
             }
         }
+        purge_stale(state, DEVICE_IP_PSQL_STORE, dev_ip_valid);
 
         // 4. Sync device MACs from macaddresses and interfaces / virtual interfaces
         let device_macs_query = r#"
@@ -518,8 +553,10 @@ impl PostgresSyncConfig {
             ORDER BY mac, COALESCE(namespace_uuid, ''), priority ASC
         "#;
 
+        let mut dev_mac_valid: Option<HashSet<String>> = None;
         match client.query(device_macs_query, &[]).await {
             Ok(rows) => {
+                let mut valid = HashSet::new();
                 for row in rows {
                     let mac: Option<String> = row.try_get("mac").ok();
                     let dev_id_opt: Option<i64> = row
@@ -552,20 +589,24 @@ impl PostgresSyncConfig {
                                     rec.insert("namespace_uuid".to_string(), json!(ns));
                                     let ns_key = format!("{}:{}", ns, norm);
                                     let _ = state.put_record(DEVICE_MAC_PSQL_STORE, &ns_key, rec);
+                                    valid.insert(ns_key);
                                     total_synced += 1;
                                     continue;
                                 }
                             }
                             let _ = state.put_record(DEVICE_MAC_PSQL_STORE, &norm, rec);
+                            valid.insert(norm);
                             total_synced += 1;
                         }
                     }
                 }
+                dev_mac_valid = Some(valid);
             }
             Err(e) => {
                 eprintln!("Warning: Failed to query device MACs: {}", e);
             }
         }
+        purge_stale(state, DEVICE_MAC_PSQL_STORE, dev_mac_valid);
 
         // 5. Sync Service Provider salts for MAC scrambling (domain_type = 6)
         let scrambles_query = "SELECT uuid::text AS uuid, property::text AS property FROM sensors WHERE domain_type = 6 AND is_deleted = false";
@@ -582,8 +623,10 @@ impl PostgresSyncConfig {
             }
         };
 
+        let mut scrambles_valid: Option<HashSet<String>> = None;
         match scrambles_rows {
             Ok(rows) => {
+                let mut valid = HashSet::new();
                 for row in rows {
                     let uuid_opt: Option<String> = row.try_get("uuid").ok();
                     let property_opt: Option<String> = row.try_get("property").ok();
@@ -610,17 +653,20 @@ impl PostgresSyncConfig {
                                         rec.insert("mac_prefix".to_string(), prefix_val.clone());
                                     }
                                     let _ = state.put_record(SCRAMBLES_STORE, clean_uuid, rec);
+                                    valid.insert(clean_uuid.to_string());
                                     total_synced += 1;
                                 }
                             }
                         }
                     }
                 }
+                scrambles_valid = Some(valid);
             }
             Err(e) => {
                 eprintln!("Warning: Failed to query Service Provider scrambles: {}", e);
             }
         }
+        purge_stale(state, SCRAMBLES_STORE, scrambles_valid);
 
         Ok(total_synced)
     }
